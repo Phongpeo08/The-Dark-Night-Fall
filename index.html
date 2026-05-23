@@ -8,7 +8,7 @@
   :root{--ui-bg:rgba(0,0,0,0.6);--accent:#66d;}
   html,body{height:100%;margin:0;background:#000;color:#fff;font-family:monospace}
   canvas{display:block;background:#071028;image-rendering:pixelated}
-  #ui{position:fixed;left:12px;top:12px;z-index:30}
+  #ui{position:fixed;left:12px;top:12px;z-index:30;background:rgba(0,0,0,0.7);border-radius:8px;padding:5px;}
   #status{background:var(--ui-bg);padding:10px;border-radius:8px;border:1px solid #123;min-width:260px}
   .bar{width:240px;height:12px;background:#222;border:1px solid #111;margin:6px 0;border-radius:4px;overflow:hidden}
   .fill{height:100%;width:0%;background:linear-gradient(#f66,#a00)}
@@ -31,6 +31,7 @@
   @keyframes fadeOut{0%{opacity:1}100%{opacity:0;display:none}}
   #infiniteVoidOverlay{position:fixed;top:0;left:0;width:100%;height:100%;background:radial-gradient(circle, #000428, #004e92);z-index:150;display:none;pointer-events:none}
   #speedrunTimer{position:fixed;right:20px;top:20px;background:rgba(0,0,0,0.7);padding:4px 12px;border-radius:8px;font-family:monospace;font-size:16px;z-index:38;display:none}
+  .combo-text{color:#ffaa44;font-weight:bold}
 </style>
 </head>
 <body>
@@ -46,10 +47,11 @@
     <div>HP: <span id="hpText">100</span> / <span id="maxHpText">100</span> <span id="armorBadge" style="background:#0af;padding:2px 6px;border-radius:8px;font-size:10px;margin-left:6px;display:none;">🛡️ ARMOR</span></div>
     <div class="bar"><div id="hpBar" class="fill"></div></div>
     <div>Armor: <span id="armorValue">0</span></div>
+    <div>Combo: <span id="comboValue" class="combo-text">0</span> x<span id="comboMult">1.0</span></div>
     <div>Sword: <span id="swordDmg">10</span> &nbsp; Gun: <span id="gunDmg">5</span></div>
     <div>Coins: <span id="coins">0</span> &nbsp; Score: <span id="score">0</span></div>
     <div class="bar"><div id="graniteBar" class="fill granite"></div></div>
-    <div id="controls">Controls: Move A/D or ←/→, Jump W/Space, F sword, E gun, R reload, V Granite, B shop, P pause, SHIFT dash</div>
+    <div id="controls">Controls: Move A/D or ←/→, Jump W/Space, F sword, E gun, R reload, V Granite, B shop, P pause, SHIFT dash, H hide UI | Shift+F Air Cut, E+F Special Shot</div>
   </div>
 </div>
 <div id="bleedingIcon">🩸 BLEEDING</div>
@@ -99,7 +101,7 @@
   <h1 style="margin:0">Shop</h1>
   <div class="small">Buy items with coins. Shop pauses the game.</div>
   <div style="margin-top:8px">
-    <button class="btn" id="buyHp">10 coins → +20 HP</button>
+    <button class="btn" id="buyHp">10 coins → +20 HP (max 200)</button>
     <button class="btn" id="buyRegen">10 coins → Regen (3hp/s for 10s)</button>
     <button class="btn" id="buyJump">10 coins → Jump Boost 10s</button>
     <button class="btn" id="buySpeed">10 coins → Speed Boost 10s</button>
@@ -224,6 +226,12 @@ let speedrunTimerRunning = false;
 let speedrunInterval = null;
 let playerArmor = 0;
 
+// Combo system
+let combo = 0;
+let comboDecayTimer = 0;
+const COMBO_DECAY_TIME = 5;
+let uiVisible = true;
+
 // Customization
 let playerSkin = "default";
 let graniteColor = "#88ddff";
@@ -231,6 +239,11 @@ let graphicsMode = "pixel";
 let use2D = false;
 let customSkinData = null;
 let customSkinImage = null;
+
+// Special moves cooldowns
+let airCutCd = 0;
+let specialShotCd = 0;
+let hLock = false;
 
 function loadCustomization() {
   let saved = localStorage.getItem('game_customize');
@@ -280,7 +293,7 @@ let player = {
   graniteCharge:0, graniteCd:0, regenTimer:0, speedTimer:0, jumpTimer:0,
   name:'Player', dashCd:0, invuln:0,
   combo:0, comboTimer:0, flash:0, jumpHeld:false,
-  bleedingTimer:0, armor:0
+  bleedingTimer:0, armor:0, facing:1
 };
 
 let graniteBeam = { active:false, timer:0, x1:0, y1:0, x2:0, y2:0 };
@@ -353,6 +366,8 @@ const armorValueSpan = document.getElementById('armorValue');
 const customizeUI = document.getElementById('customizeUI');
 const skinCanvas = document.getElementById('skinCanvas');
 const skinCtx = skinCanvas.getContext('2d');
+const comboValueSpan = document.getElementById('comboValue');
+const comboMultSpan = document.getElementById('comboMult');
 
 const pauseMenu = document.getElementById('pauseMenu');
 const shopUI = document.getElementById('shopUI');
@@ -605,11 +620,18 @@ function startGame(){
   game.nextWaveQueued = false;
   killCounter = 0;
   skillTesterHpBonus = 0;
+  // Reset combo
+  combo = 0;
+  comboDecayTimer = 0;
+  airCutCd = 0;
+  specialShotCd = 0;
   document.getElementById('hpBar').style.background = 'linear-gradient(#f66,#a00)';
   armorBadge.style.display = 'none';
   armorValueSpan.textContent = '0';
   document.getElementById('speedrunTimer').style.display = 'none';
   document.getElementById('graniteBar').style.display = 'block';
+  document.getElementById('ui').style.display = 'block';
+  uiVisible = true;
   
   gameSpeed = 1.0;
   hardModeActive = false;
@@ -651,7 +673,7 @@ function startGame(){
   }
 }
 
-// Tutorial Mode
+// Tutorial Mode (không có Captain, tất cả enemy đứng im)
 function startTutorial(){
   let x = game.mapWidth/2 - 500;
   let enemies = [
@@ -663,8 +685,7 @@ function startTutorial(){
     {kind:'destructor', desc:'Destructor: shoots bullets', color:'#fff'},
     {kind:'masked', desc:'Masked Brute: high HP, bleeding', color:'#222'},
     {kind:'sorcerer', desc:'Sorcerer: Divergent Fist, 10% Black Flash', color:'#800080'},
-    {kind:'pirate', desc:'Pirate: shoots bullets, explodes on death', color:'#8B4513'},
-    {kind:'captain', desc:'Captain: final boss (wave 50)', color:'#222'}
+    {kind:'pirate', desc:'Pirate: shoots bullets, explodes on death', color:'#8B4513'}
   ];
   for(let i=0;i<enemies.length;i++){
     let e;
@@ -678,11 +699,9 @@ function startTutorial(){
     } else if(enemies[i].kind === 'flying'){
       e = new Entity(spawnX, 200, 34, 34, {hp:10, color:'#ffea00', attackDamage:0, speed:0, canFly:true, score:4, coins:4});
     } else if(enemies[i].kind === 'sorcerer'){
-      e = new Entity(spawnX, groundY()-48, 28, 48, {hp:50, color:'#800080', attackDamage:10, speed:100, score:8, coins:8});
+      e = new Entity(spawnX, groundY()-48, 28, 48, {hp:50, color:'#800080', attackDamage:10, speed:0, score:8, coins:8});
     } else if(enemies[i].kind === 'pirate'){
-      e = new Entity(spawnX, groundY()-48, 28, 48, {hp:40, color:'#8B4513', attackDamage:2, speed:80, score:9, coins:9});
-    } else if(enemies[i].kind === 'captain'){
-      e = new Entity(spawnX, groundY()-player.h, player.w, player.h, {hp:625, color:'#222', attackDamage:0, speed:210, score:333, coins:333, boss:true, name:'Captain'});
+      e = new Entity(spawnX, groundY()-48, 28, 48, {hp:40, color:'#8B4513', attackDamage:2, speed:0, score:9, coins:9});
     } else {
       spawnEnemy(enemies[i].kind, spawnX);
       e = game.entities[game.entities.length-1];
@@ -827,7 +846,7 @@ function spawnEnemy(kind, x){
   }
 }
 
-// Quái đặc biệt cũ
+// Quái đặc biệt cũ (Summoner, Destructor, Masked Brute) với update đầy đủ
 function spawnSummoner(x){
   let hpMul = hardModeActive ? 2 : 1;
   let dmgMul = hardModeActive ? 2 : 1;
@@ -1304,11 +1323,11 @@ function spawnSlasher(){
   return true;
 }
 
-// ==================== BOSS FALLEN ONE (đã sửa lỗi hạ cánh) ====================
+// ==================== BOSS FALLEN ONE (đã sửa lỗi hạ cánh + Black Flash, Infinity shield) ====================
 function spawnFallenOne(){
   const spawnX = clampSpawnX(game.camera.x + W + 300);
   let hpMul = hardModeActive ? 2 : 1;
-  const b = new Entity(spawnX, groundY()-player.h, player.w, player.h, {hp:500*hpMul, color:'#3399ff', attackDamage:0, speed:180, score:250, coins:250, boss:true, name:'Fallen One'});
+  const b = new Entity(spawnX, groundY()-player.h, player.w, player.h, {hp:500*hpMul, color:'#3399ff', attackDamage:10, speed:180, score:250, coins:250, boss:true, name:'Fallen One'});
   b.phase = 1;
   b.cooldowns = { infinity:0, lapse:0, reversal:0, lapseMax:0, reversalMax:0, hollow:0, unlimited:0, infiniteVoid:0 };
   b.state = 'idle';
@@ -1320,9 +1339,18 @@ function spawnFallenOne(){
   b.unlimitedActive = false;
   b.unlimitedPos = null;
   b.invincibleTimer = 0;
+  b.infinityShield = false; // hiệu ứng cầu trắng
+  b.blackFlashTimer = 0;
+  
   b.update = function(dt){
     if(this.hp <= 0) return;
     for(let k in this.cooldowns) if(this.cooldowns[k] > 0) this.cooldowns[k] -= dt;
+    
+    if(this.infinityShield){
+      this.infinityShieldTimer -= dt;
+      if(this.infinityShieldTimer <= 0) this.infinityShield = false;
+    }
+    
     if(this.state === 'charging_hollow'){
       this.hollowCharge += dt;
       if(Math.random()<0.2) spawnCustomParticles(this.x+this.w/2, this.y+this.h/2, 2, '#aa88ff', 30, -50, 5, 15);
@@ -1355,6 +1383,7 @@ function spawnFallenOne(){
         this.unlimitedActive = false;
       }
     }
+    
     if(this.phase === 2){
       if(this.floatTimer > 0){
         this.floatTimer -= dt;
@@ -1373,17 +1402,39 @@ function spawnFallenOne(){
         return;
       }
     }
+    
     let dir = Math.sign(player.x - this.x);
     this.vx = dir * this.speed;
     this.x += this.vx * dt;
     this.x = clamp(this.x, 0, game.mapWidth - this.w);
     this.y = groundY() - this.h;
+    
+    // Tấn công thường + Black Flash
+    if(this.attackCd <= 0 && Math.abs(this.x - player.x) < 80){
+      let isBlackFlash = (Math.random() < 0.1);
+      let damage = isBlackFlash ? 20 : 10;
+      playerTakeDamage(damage);
+      if(isBlackFlash){
+        spawnCustomParticles(player.x+player.w/2, player.y+player.h/2, 30, '#000000', 150, -100, 6, 25);
+        screenShake(6, 150);
+      } else {
+        spawnCustomParticles(player.x+player.w/2, player.y+player.h/2, 8, '#ff8888', 50, -60, 3, 15);
+      }
+      this.attackCd = 1.0;
+    }
+    this.attackCd = Math.max(0, this.attackCd - dt);
+    
     if(this.state !== 'idle') return;
+    
+    // Infinity (bất tử + cầu trắng)
     if(this.cooldowns.infinity <= 0 && Math.random() < 0.01){
       this.cooldowns.infinity = 10;
       this.invincibleTimer = 1;
-      spawnCustomParticles(this.x+this.w/2, this.y+this.h/2, 30, '#aaddff', 60, -80, 6, 20);
+      this.infinityShield = true;
+      this.infinityShieldTimer = 1;
+      spawnCustomParticles(this.x+this.w/2, this.y+this.h/2, 50, '#ffffff', 80, -80, 6, 20);
     }
+    
     if(this.phase === 1){
       if(this.cooldowns.lapse <= 0 && Math.random() < 0.015){
         this.cooldowns.lapse = 15;
@@ -1419,6 +1470,7 @@ function spawnFallenOne(){
         for(let i=0;i<20;i++) spawnCustomParticles(centerX, centerY, 1, '#ff4444', 80, -80, 5, 20);
       }
     }
+    
     if(this.phase === 2){
       if(this.cooldowns.lapseMax <= 0 && Math.random() < 0.02){
         this.cooldowns.lapseMax = 20;
@@ -1477,6 +1529,7 @@ function spawnFallenOne(){
         }, 5000);
       }
     }
+    
     if(this.phase === 2 && !this.unlimitedActive){
       let lapseBullet = null, reversalBullet = null;
       for(let b of game.bullets){
@@ -1492,8 +1545,10 @@ function spawnFallenOne(){
         reversalBullet.alive = false;
       }
     }
+    
     if(this.invincibleTimer > 0){ this.invincibleTimer -= dt; this.flash = 0.1; }
   };
+  
   b.takeDamage = function(amount){
     if(this.invincibleTimer > 0) return;
     this.hp -= amount;
@@ -1515,11 +1570,10 @@ function spawnFallenOne(){
       }
     }
   };
+  
   b.onDeath = function(){
     achievements['The Strongest'] = true;
-    achievements['Beat the game'] = true;
     showAchievement('The Strongest');
-    showAchievement('Beat the game');
     player.coins += 250;
     player.score += 250;
     for(let i=0;i<80;i++) spawnCustomParticles(b.x+b.w/2, b.y+b.h/2, 1, '#ffffff', 100, -150, 6, 30);
@@ -1542,19 +1596,17 @@ function spawnFallenOne(){
           achievements['How could you afford that'] = true;
           showAchievement('How could you afford that');
         }
-        game.running = false;
-        playMusic('victory');
-        if(speedrunModeActive){
-          alert(`Speedrun completed! Time: ${(speedrunTimer).toFixed(2)}s. Leaderboard updated.`);
-        } else {
-          saveScore(player.name, Math.round(player.score), false);
-          alert('You defeated Fallen One! Victory! Score saved.');
-        }
-        showMenu();
+        // Không kết thúc game ở đây, chỉ xóa boss
+        game.bossActive = false;
+        game.backgroundDestroyed = false;
+        playMusic('wave');
+        game.waveActive = false;
+        game.nextWaveQueued = false;
       }, 1000);
     }, 500);
     b.hp = -1;
   };
+  
   game.entities.push(b);
   game.bossActive = true;
   bossHpUI.style.display = 'block';
@@ -1568,7 +1620,7 @@ function spawnFallenOne(){
   return true;
 }
 
-// ==================== BOSS CAPTAIN (WAVE 50) ====================
+// ==================== BOSS CAPTAIN (WAVE 50 - KẾT THÚC GAME) ====================
 function spawnCaptain(){
   const spawnX = clampSpawnX(game.camera.x + W + 300);
   let hpMul = hardModeActive ? 2 : 1;
@@ -1707,7 +1759,9 @@ function spawnCaptain(){
   
   b.onDeath = function(){
     achievements['Captain - Agony'] = true;
+    achievements['Beat the game'] = true;
     showAchievement('Captain - Agony');
+    showAchievement('Beat the game');
     player.coins += 333;
     player.score += 333;
     let deathText = document.createElement('div');
@@ -1734,14 +1788,27 @@ function spawnCaptain(){
           let idx = game.crates.indexOf(barrel);
           if(idx!==-1) game.crates.splice(idx,1);
         }
+        // KẾT THÚC GAME
+        game.running = false;
+        playMusic('victory');
+        if(speedrunModeActive){
+          speedrunTimerRunning = false;
+          if(speedrunInterval) clearInterval(speedrunInterval);
+          let speedrunData = JSON.parse(localStorage.getItem('ddf_speedrun_leaderboard')||'[]');
+          speedrunData.push({name:player.name, time:speedrunTimer});
+          speedrunData.sort((a,b)=>a.time - b.time);
+          localStorage.setItem('ddf_speedrun_leaderboard', JSON.stringify(speedrunData.slice(0,10)));
+          alert(`Speedrun completed! Time: ${(speedrunTimer).toFixed(2)}s. Leaderboard updated.`);
+        } else {
+          saveScore(player.name, Math.round(player.score), false);
+          alert('You defeated Captain! Victory! Score saved.');
+        }
+        showMenu();
       }, 500);
     }, 500);
     b.hp = -1;
     game.bossActive = false;
     game.backgroundDestroyed = false;
-    playMusic('wave');
-    game.waveActive = false;
-    game.nextWaveQueued = false;
   };
   
   game.entities.push(b);
@@ -1789,7 +1856,8 @@ function spawnSkillTester(){
         let sx = this.x + this.w/2, sy = this.y + this.h/2 - 10;
         let dx = player.x + player.w/2 - sx, dy = player.y + player.h/2 - sy;
         let mag = Math.hypot(dx,dy)||1;
-        let vx = dx/mag * 600, vy = dy/mag * 600;
+        let vx = dx/mag * 600;
+        let vy = dy/mag * 600;
         game.bullets.push(new Bullet(sx,sy,vx,vy,this,5,false));
         spawnSmoke(sx, sy, 2);
       }
@@ -1910,6 +1978,50 @@ function handleInput(dt){
   if(!keys['f']) fLock = false;
   if(keys['v'] && !vLock){ if(player.graniteCharge >= 200) useGranite(); vLock = true; }
   if(!keys['v']) vLock = false;
+  
+  // Special moves: Shift+F (Air Cut)
+  if(keys['shift'] && keys['f'] && !fLock && airCutCd <= 0){
+    airCutCd = 1.5;
+    let dashDist = 80;
+    player.x += (player.facing||1) * dashDist;
+    player.x = clamp(player.x, 0, game.mapWidth - player.w);
+    let cx = player.x + player.w/2 + (player.facing||1) * 30;
+    let cy = player.y + player.h/2;
+    for(let e of game.entities){
+      if(e.hp<=0) continue;
+      if(Math.abs(e.x+e.w/2 - cx) < 40 && Math.abs(e.y+e.h/2 - cy) < 50){
+        if(e.takeDamage) e.takeDamage(5);
+        else e.hp -= 5;
+        e.flash = 0.2;
+        spawnCustomParticles(e.x+e.w/2, e.y+e.h/2, 5, '#ffffff', 50, -50, 3, 10);
+      }
+    }
+    fLock = true;
+  }
+  if(!keys['f']) fLock = false;
+  
+  // Special moves: E+F (Special Shot)
+  if(keys['e'] && keys['f'] && !eLock && specialShotCd <= 0){
+    specialShotCd = 1.0;
+    let sx = player.x + player.w/2, sy = player.y + player.h/2 - 10;
+    let dx = mouse.x - sx, dy = mouse.y - sy;
+    let mag = Math.hypot(dx,dy) || 1;
+    let vx = dx/mag * 1200;
+    let vy = dy/mag * 1200;
+    let bullet = new Bullet(sx, sy, vx, vy, player, 10, true);
+    bullet.color = '#ffff88';
+    game.bullets.push(bullet);
+    eLock = true;
+  }
+  if(!keys['e']) eLock = false;
+  
+  // Toggle UI with H
+  if(keys['h'] && !hLock){
+    uiVisible = !uiVisible;
+    document.getElementById('ui').style.display = uiVisible ? 'block' : 'none';
+    hLock = true;
+  }
+  if(!keys['h']) hLock = false;
 }
 
 // =========================
@@ -1918,7 +2030,11 @@ function handleInput(dt){
 function update(dt){
   handleInput(dt);
   const now = game.time || performance.now();
-
+  
+  // Cooldowns for special moves
+  if(airCutCd > 0) airCutCd -= dt;
+  if(specialShotCd > 0) specialShotCd -= dt;
+  
   player.swordCd = Math.max(0, player.swordCd - dt);
   player.gunCd = Math.max(0, player.gunCd - dt);
   player.graniteCd = Math.max(0, player.graniteCd - dt);
@@ -1935,21 +2051,29 @@ function update(dt){
   } else {
     bleedingIcon.style.display = 'none';
   }
-
+  
+  // Combo decay
+  if(comboDecayTimer > 0){
+    comboDecayTimer -= dt;
+    if(comboDecayTimer <= 0){
+      combo = 0;
+    }
+  }
+  
   player.comboTimer = Math.max(0, player.comboTimer - dt);
   if(player.comboTimer <= 0) player.combo = 0;
-
+  
   if(graniteBeam.active){
     graniteBeam.timer -= dt;
     if(graniteBeam.timer <= 0) graniteBeam.active = false;
   }
-
+  
   let move = 0;
   if(keys['a']||keys['arrowleft']) move -= 1;
   if(keys['d']||keys['arrowright']) move += 1;
   player.vx = move * player.speed * (player.speedTimer>0?1.4:1);
   if(move!==0) player.facing = move>0?1:-1;
-
+  
   if(keys['shift'] && player.dashCd===0){
     player.dashCd = 1.0;
     player.x += (player.facing||1) * 120;
@@ -1958,35 +2082,38 @@ function update(dt){
     player.invuln = 0.2;
     for(let i=0;i<8;i++) spawnSmoke(player.x + rand(-10,10), player.y + rand(-10,10), 1);
   }
-
+  
   if((keys['w']||keys[' ']) && player.onGround && !player.jumpHeld){
     player.vy = -player.jump * (player.jumpTimer>0?1.4:1);
     player.onGround=false;
     player.jumpHeld = true;
   }
   if(!keys['w'] && !keys[' ']) player.jumpHeld = false;
-
+  
   player.vy += 1600 * dt;
   player.x += player.vx * dt;
   player.y += player.vy * dt;
-
+  
   if(player.regenTimer > 0) player.hp = Math.min(player.maxHp, player.hp + 3 * dt);
-
+  // Giới hạn máu tối đa 200
+  if(player.hp > 200) player.hp = 200;
+  if(player.maxHp > 200) player.maxHp = 200;
+  
   const topLimit = 0;
   const bottomLimit = groundY() - player.h;
   if(player.y < topLimit) { player.y = topLimit; player.vy = Math.max(0, player.vy); }
   if(player.y > bottomLimit) { player.y = bottomLimit; player.vy = 0; player.onGround = true; }
-
+  
   const leftLimit = 0;
   const rightLimit = Math.max(0, game.mapWidth - player.w);
   if(player.x < leftLimit) { player.x = leftLimit; player.vx = 0; }
   if(player.x > rightLimit) { player.x = rightLimit; player.vx = 0; }
-
+  
   game.camera.x = clamp(player.x - W/2, 0, Math.max(0, game.mapWidth - W));
   game.camera.y = 0;
-
+  
   const nearbyEntities = game.entities.filter(e => Math.abs(e.x - player.x) < 2000);
-
+  
   for(let b of game.bullets){
     b.x += b.vx * dt * (b.fast?3:1);
     b.y += b.vy * dt * (b.fast?3:1);
@@ -1996,9 +2123,13 @@ function update(dt){
         if(e.hp>0 && pointInRect(b.x,b.y,e)){
           if(e.takeDamage) e.takeDamage(b.damage);
           else e.hp -= b.damage;
-          player.combo++;
+          // Combo và điểm
+          combo++;
+          comboDecayTimer = COMBO_DECAY_TIME;
+          let scoreGain = (e.score || 0) * (1 + combo/10);
+          player.score += scoreGain;
+          player.combo = combo;
           player.comboTimer = 3;
-          player.score += player.combo;
           e.vx += Math.sign(e.x - player.x) * 120;
           spawnBlood(b.x,b.y,4);
           b.alive=false;
@@ -2009,7 +2140,7 @@ function update(dt){
     }
   }
   game.bullets = game.bullets.filter(b => b.alive && b.life > 0 && b.x > -1000 && b.x < game.mapWidth + 1000 && b.y > -1000 && b.y < H + 1000);
-
+  
   for(let i=game.entities.length-1;i>=0;i--){
     const e = game.entities[i];
     if(e.hp<=0){
@@ -2034,16 +2165,20 @@ function update(dt){
       }
       if(e.onDeath && !e.boss) e.onDeath();
       if(Math.random() < 0.12 && gameMode !== 'tutorial') game.crates.push({x: clampSpawnX(e.x), y: e.y-40, vy:0, w:28, h:28, type:'hp', landed:false, collected:false});
-      player.score += e.score || 0;
+      // Combo và điểm khi giết enemy
+      combo++;
+      comboDecayTimer = COMBO_DECAY_TIME;
+      let scoreGain = (e.score || 0) * (1 + combo/10);
+      player.score += scoreGain;
       player.coins += e.coins || 0;
       game.entities.splice(i,1);
       continue;
     }
     if(Math.abs(e.x - player.x) > 2500){ e.hp = 0; continue; }
     if(e.y > H + 1000){ e.hp = 0; continue; }
-
+    
     e.flash = Math.max(0, (e.flash||0) - dt);
-
+    
     if(e.digger){
       if(e.state === "underground"){
         const dir = Math.sign(player.x - e.x);
@@ -2093,7 +2228,7 @@ function update(dt){
     e.attackCd = Math.max(0, e.attackCd - dt);
     if(e.boss && e.update) e.update(dt);
   }
-
+  
   for(let b of game.bullets){
     if(!b.alive) continue;
     if(b.owner !== player && pointInRect(b.x,b.y,player)){
@@ -2111,7 +2246,7 @@ function update(dt){
       }
     }
   }
-
+  
   if(game.bossActive && !game.entities.some(e=>e.boss && e.hp>0)){
     game.bossActive = false;
     game.backgroundDestroyed = false;
@@ -2119,9 +2254,9 @@ function update(dt){
     game.waveActive = false;
     game.nextWaveQueued = false;
   }
-
+  
   if(Math.random() < dt/60 && gameMode !== 'tutorial') spawnCrate();
-
+  
   for(let i=game.crates.length-1;i>=0;i--){
     const c = game.crates[i];
     c.vy += 800*dt;
@@ -2130,13 +2265,13 @@ function update(dt){
     if(rectsOverlap(c, player) && !c.collected){
       c.collected=true;
       playSound('crateSound');
-      if(c.type==='hp') player.hp = Math.min(player.maxHp, player.hp + 10);
+      if(c.type==='hp') { player.hp = Math.min(player.maxHp, player.hp + 10); if(player.hp > 200) player.hp = 200; }
       else if(c.type==='dmg'){ player.swordDmg *= 1.5; player.gunDmg *= 1.5; setTimeout(()=>{ if(game.running){ player.swordDmg/=1.5; player.gunDmg/=1.5; } },10000); }
       else if(c.type==='coins') player.coins += 50;
     }
     if(c.collected) game.crates.splice(i,1);
   }
-
+  
   for(let p of game.particles){
     p.x += p.vx * dt;
     p.y += p.vy * dt;
@@ -2145,7 +2280,7 @@ function update(dt){
   }
   game.particles = game.particles.filter(p=>p.life>0);
   if(game.particles.length > 900) game.particles.splice(0, game.particles.length - 900);
-
+  
   hpText.textContent = Math.round(player.hp);
   maxHpText.textContent = Math.round(player.maxHp);
   hpBar.style.width = `${clamp(player.hp/player.maxHp*100,0,100)}%`;
@@ -2154,7 +2289,9 @@ function update(dt){
   swordDmgText.textContent = Math.round(player.swordDmg);
   gunDmgText.textContent = Math.round(player.gunDmg);
   graniteBar.style.width = `${clamp(player.graniteCharge/200*100,0,100)}%`;
-
+  comboValueSpan.textContent = combo;
+  comboMultSpan.textContent = (1 + combo/10).toFixed(1);
+  
   const boss = game.entities.find(e=>e.boss && e.hp>0);
   if(boss){
     bossHpUI.style.display = 'block';
@@ -2163,7 +2300,7 @@ function update(dt){
   } else {
     bossHpUI.style.display = 'none';
   }
-
+  
   const aliveEnemies = game.entities.filter(e => e.hp > 0 && !e.boss);
   if(aliveEnemies.length === 0 && !game.nextWaveQueued && !game.bossActive && !game.endingDelay){
     game.waveActive = false;
@@ -2179,13 +2316,14 @@ function update(dt){
     }
     game.nextWaveQueued = true;
     player.hp = Math.min(player.maxHp, player.hp + 20);
+    if(player.hp > 200) player.hp = 200;
     setTimeout(()=>{
       if(!game.running){ game.nextWaveQueued = false; return; }
       if(!game.waveActive && !game.bossActive) spawnWave();
       game.nextWaveQueued = false;
     }, 1500);
   }
-
+  
   if(player.hp<=0){
     player.lives -= 1;
     if(player.lives>0){
@@ -2194,6 +2332,9 @@ function update(dt){
       player.y = groundY()-player.h;
       player.invuln = 1.0;
       player.vx = 0; player.vy = 0;
+      // Reset combo khi chết? Yêu cầu: combo dừng trong cảnh chết, nhưng khi hồi sinh thì combo vẫn reset? Tốt nhất reset combo.
+      combo = 0;
+      comboDecayTimer = 0;
     } else {
       endGame();
     }
@@ -2278,6 +2419,18 @@ function render(){
       ctx.font = '12px monospace';
       ctx.fillText(e.desc, ex, ey - 10);
     }
+    // Vẽ cầu trắng khi Fallen One dùng Infinity
+    if(e.name === 'Fallen One' && e.infinityShield){
+      ctx.beginPath();
+      ctx.arc(ex + e.w/2, ey + e.h/2, 40, 0, Math.PI*2);
+      ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(ex + e.w/2, ey + e.h/2, 35, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      ctx.fill();
+    }
   }
   for(let e of game.entities){
     if(e.digger && e.state === "warning" && e.warningTimer > 0){
@@ -2360,7 +2513,7 @@ function render(){
 }
 
 // =========================
-// Background & sword arc
+// Background & sword arc (giữ nguyên)
 // =========================
 function renderBackground(){
   ctx.fillStyle = '#eef';
@@ -2436,7 +2589,13 @@ function swordAttack(){
       }
       if(e.takeDamage) e.takeDamage(player.swordDmg);
       else e.hp -= player.swordDmg;
-      player.combo++; player.comboTimer = 3; player.score += player.combo;
+      player.combo++;
+      player.comboTimer = 3;
+      // combo score
+      combo++;
+      comboDecayTimer = COMBO_DECAY_TIME;
+      let scoreGain = (e.score || 0) * (1 + combo/10);
+      player.score += scoreGain;
       screenShake(3,80);
       for(let i=0;i<4;i++) spawnSmoke(e.x + rand(0,e.w), e.y + rand(0,e.h), 1);
       e.flash = 0.1;
@@ -2501,7 +2660,11 @@ function useGranite(){
       hitEnemies.add(e);
       if(e.takeDamage) e.takeDamage(50);
       else e.hp -= 50;
-      player.combo++; player.comboTimer = 3; player.score += player.combo;
+      player.combo++; player.comboTimer = 3;
+      combo++;
+      comboDecayTimer = COMBO_DECAY_TIME;
+      let scoreGain = (e.score || 0) * (1 + combo/10);
+      player.score += scoreGain;
       spawnBlood(ex, ey, 8);
       spawnSmoke(ex, ey, 6);
       e.vx += dirX * 700;
@@ -2533,6 +2696,7 @@ function playerTakeDamage(d){
   } else {
     player.hp -= d;
   }
+  if(player.hp < 0) player.hp = 0;
   player.invuln = 0.5;
   player.flash = 0.2;
   playSound('hitSound',0.8);
@@ -2587,7 +2751,7 @@ function openShop(){
   if(game.bossActive) playMusic('boss'); else playMusic('wave');
 }
 document.getElementById('closeShop').onclick = ()=>{ shopUI.style.display='none'; if(!pauseMenu.style.display || pauseMenu.style.display === 'none') game.paused=false; playMusic(game.bossActive ? 'boss' : 'wave'); };
-document.getElementById('buyHp').onclick = ()=>{ if(player.coins>=10 && !hardModeActive){ player.coins-=10; player.hp = Math.min(player.maxHp, player.hp+20); } };
+document.getElementById('buyHp').onclick = ()=>{ if(player.coins>=10 && !hardModeActive){ player.coins-=10; player.hp = Math.min(player.maxHp, player.hp+20); if(player.hp > 200) player.hp = 200; } };
 document.getElementById('buyRegen').onclick = ()=>{ if(player.coins>=10){ player.coins-=10; player.regenTimer = 10; } };
 document.getElementById('buyJump').onclick = ()=>{ if(player.coins>=10){ player.coins-=10; player.jumpTimer = 10; } };
 document.getElementById('buySpeed').onclick = ()=>{ if(player.coins>=10){ player.coins-=10; player.speedTimer = 10; } };
@@ -2598,6 +2762,8 @@ document.getElementById('buyArmor').onclick = ()=>{
     player.armor += armorGain;
     player.maxHp += armorGain;
     player.hp += armorGain;
+    if(player.maxHp > 200) player.maxHp = 200;
+    if(player.hp > 200) player.hp = 200;
     document.getElementById('hpBar').style.background = 'linear-gradient(#0af,#06f)';
     armorBadge.style.display = 'inline-block';
     armorValueSpan.textContent = player.armor;
